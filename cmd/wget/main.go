@@ -15,7 +15,7 @@ type WriteCounter struct {
 	Filename   string
 	Total      uint64
 	Downloaded uint64
-	Error      bool
+	Err        error
 }
 
 func (wc *WriteCounter) Write(p []byte) (int, error) {
@@ -24,8 +24,12 @@ func (wc *WriteCounter) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-func (wc *WriteCounter) CalculateProgressPercent() uint64 {
-	return (wc.Downloaded * 100) / wc.Total
+func (wc *WriteCounter) String() string {
+	if wc.Err != nil {
+		return wc.Err.Error()
+	} else {
+		return fmt.Sprintf("%d%%", wc.Downloaded*100/wc.Total)
+	}
 }
 
 type Progress struct {
@@ -40,14 +44,11 @@ func (p *Progress) AddCounter(wc *WriteCounter) {
 
 	p.Counters[wc.Filename] = wc
 
-	keys := make([]string, len(p.Counters))
-	i := 0
+	p.FileNames = make([]string, 0, len(p.Counters))
 	for k := range p.Counters {
-		keys[i] = k
-		i++
+		p.FileNames = append(p.FileNames, k)
 	}
-	sort.Strings(keys)
-	p.FileNames = keys
+	sort.Strings(p.FileNames)
 }
 
 func (p *Progress) PrintProgress() {
@@ -55,18 +56,13 @@ func (p *Progress) PrintProgress() {
 	defer p.Mutex.RUnlock()
 
 	fmt.Printf("\r")
-	for _, key := range p.FileNames {
-		wc := p.Counters[key]
-		if p.Counters[key].Error {
-			fmt.Printf("%s error | ", wc.Filename)
-		} else {
-			fmt.Printf("%s %d%% | ", wc.Filename, wc.CalculateProgressPercent())
-		}
+	for _, v := range p.FileNames {
+		fmt.Printf("%s: %s | ", v, p.Counters[v])
 	}
 }
 
 func main() {
-	urls := withoutDuplicates(os.Args[1:])
+	urls := unique(os.Args[1:])
 	progress := &Progress{Counters: make(map[string]*WriteCounter)}
 	wg := sync.WaitGroup{}
 
@@ -99,39 +95,39 @@ func getFileName(url string) string {
 	return parts[len(parts)-1]
 }
 
-func withoutDuplicates(items []string) []string {
-	duplicatesMap := make(map[string]bool)
-	var list []string
-	for _, item := range items {
-		if _, value := duplicatesMap[item]; !value {
-			duplicatesMap[item] = true
-			list = append(list, item)
+func unique(s []string) []string {
+	m := make(map[string]struct{}, len(s))
+	out := make([]string, 0, len(s))
+
+	for _, v := range s {
+		if _, ok := m[v]; !ok {
+			m[v] = struct{}{}
+			out = append(out, v)
 		}
 	}
-	return list
+	return out
 }
 
 func downloadFile(url string, progress *Progress) {
 	fileName := getFileName(url)
 	wc := &WriteCounter{Filename: fileName}
+	progress.AddCounter(wc)
 	resp, err := http.Get(url)
 	if err != nil {
-		wc.Error = true
-		progress.AddCounter(wc)
+		wc.Err = err
 		return
 	}
 	defer resp.Body.Close()
 
 	out, err := os.Create(fileName)
 	if err != nil {
-		wc.Error = true
-		progress.AddCounter(wc)
+		wc.Err = err
 		return
 	}
 	defer out.Close()
 
 	wc.Total = uint64(resp.ContentLength)
-	progress.AddCounter(wc)
 
 	_, err = io.Copy(out, io.TeeReader(resp.Body, wc))
+	wc.Err = err
 }

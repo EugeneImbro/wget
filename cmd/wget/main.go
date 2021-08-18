@@ -5,65 +5,58 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"sort"
-	"strings"
+	"path/filepath"
 	"sync"
 	"time"
 )
 
-type WriteCounter struct {
+type CountingWriter struct {
 	Filename   string
 	Total      uint64
 	Downloaded uint64
 	Err        error
 }
 
-func (wc *WriteCounter) Write(p []byte) (int, error) {
+func (wc *CountingWriter) Write(p []byte) (int, error) {
 	n := len(p)
 	wc.Downloaded += uint64(n)
 	return n, nil
 }
 
-func (wc *WriteCounter) String() string {
+func (wc *CountingWriter) String() string {
 	if wc.Err != nil {
 		return wc.Err.Error()
 	} else {
-		return fmt.Sprintf("%d%%", wc.Downloaded*100/wc.Total)
+		return fmt.Sprintf("%s %d%%", wc.Filename, wc.Downloaded*100/wc.Total)
 	}
 }
 
 type Progress struct {
-	Mutex     sync.RWMutex
-	Counters  map[string]*WriteCounter
-	FileNames []string
+	mu       sync.RWMutex
+	Counters []*CountingWriter
 }
 
-func (p *Progress) AddCounter(wc *WriteCounter) {
-	p.Mutex.Lock()
-	defer p.Mutex.Unlock()
+func (p *Progress) AddCounter(wc *CountingWriter) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
-	p.Counters[wc.Filename] = wc
-
-	p.FileNames = make([]string, 0, len(p.Counters))
-	for k := range p.Counters {
-		p.FileNames = append(p.FileNames, k)
-	}
-	sort.Strings(p.FileNames)
+	p.Counters = append(p.Counters, wc)
 }
 
 func (p *Progress) PrintProgress() {
-	p.Mutex.RLock()
-	defer p.Mutex.RUnlock()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 
+	//todo tab writer
 	fmt.Printf("\r")
-	for _, v := range p.FileNames {
-		fmt.Printf("%s: %s | ", v, p.Counters[v])
+	for _, v := range p.Counters {
+		fmt.Printf("%s | ", v)
 	}
 }
 
 func main() {
 	urls := unique(os.Args[1:])
-	progress := &Progress{Counters: make(map[string]*WriteCounter)}
+	progress := &Progress{Counters: make([]*CountingWriter, 0)}
 	wg := sync.WaitGroup{}
 
 	fmt.Println("Download started...")
@@ -90,11 +83,6 @@ func main() {
 	fmt.Println("\nDownload finished.")
 }
 
-func getFileName(url string) string {
-	parts := strings.Split(url, "/")
-	return parts[len(parts)-1]
-}
-
 func unique(s []string) []string {
 	m := make(map[string]struct{}, len(s))
 	out := make([]string, 0, len(s))
@@ -109,8 +97,8 @@ func unique(s []string) []string {
 }
 
 func downloadFile(url string, progress *Progress) {
-	fileName := getFileName(url)
-	wc := &WriteCounter{Filename: fileName}
+	fileName := filepath.Base(url)
+	wc := &CountingWriter{Filename: fileName}
 	progress.AddCounter(wc)
 	resp, err := http.Get(url)
 	if err != nil {

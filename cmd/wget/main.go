@@ -78,17 +78,17 @@ func main() {
 
 		fmt.Printf("\nTerminating by %s signal\n", s)
 		exitCode := 0
-		for _, counter := range progress.Counters {
-			if counter.Err != nil || counter.Closer == nil {
+		for _, c := range progress.Counters {
+			if c.Err != nil || c.Closer == nil || c.Downloaded*100/c.Total == 100 {
 				continue
 			} else {
-				if err := counter.Closer.Close(); err != nil {
+				if err := c.Closer.Close(); err != nil {
 					fmt.Printf("Cannot gracefully terminate the program. %s\n", err.Error())
 					exitCode = 1
 					continue
 				}
 
-				if err := os.Remove(counter.Filename); err != nil {
+				if err := os.Remove(c.Filename); err != nil {
 					fmt.Printf("Cannot gracefully terminate the program. %s\n", err.Error())
 					exitCode = 1
 				}

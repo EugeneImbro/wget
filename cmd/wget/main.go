@@ -5,8 +5,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -16,6 +18,7 @@ type CountingWriter struct {
 	Total      uint64
 	Downloaded uint64
 	Err        error
+	Closer     io.Closer
 }
 
 func (cw *CountingWriter) Write(p []byte) (int, error) {
@@ -64,6 +67,36 @@ func main() {
 	urls := unique(os.Args[1:])
 	progress := &Progress{Counters: make([]*CountingWriter, 0)}
 	wg := sync.WaitGroup{}
+	ticker := time.NewTicker(500 * time.Millisecond)
+
+	//interrupt cleanup
+	go func() {
+		sigs := make(chan os.Signal, 1)
+		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+		s := <-sigs
+		ticker.Stop()
+
+		fmt.Printf("\nTerminating by %s signal\n", s)
+		exitCode := 0
+		for _, counter := range progress.Counters {
+			if counter.Err != nil || counter.Closer == nil {
+				continue
+			} else {
+				if err := counter.Closer.Close(); err != nil {
+					fmt.Printf("Cannot gracefully terminate the program. %s\n", err.Error())
+					exitCode = 1
+					continue
+				}
+
+				if err := os.Remove(counter.Filename); err != nil {
+					fmt.Printf("Cannot gracefully terminate the program. %s\n", err.Error())
+					exitCode = 1
+				}
+			}
+		}
+		fmt.Print("Terminated")
+		os.Exit(exitCode)
+	}()
 
 	fmt.Println("Download started...")
 
@@ -77,7 +110,6 @@ func main() {
 		progress.AddCounter(<-ch)
 	}
 
-	ticker := time.NewTicker(500 * time.Millisecond)
 	go func() {
 		for range ticker.C {
 			progress.PrintProgress()
@@ -121,7 +153,7 @@ func downloadFile(url string, ch chan *CountingWriter) {
 		return
 	}
 	defer out.Close()
-
+	cw.Closer = out
 	cw.Total = uint64(resp.ContentLength)
 
 	_, err = io.Copy(out, io.TeeReader(resp.Body, cw))

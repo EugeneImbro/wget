@@ -11,6 +11,7 @@ import (
 )
 
 type CountingWriter struct {
+	mu         sync.RWMutex
 	Filename   string
 	Total      uint64
 	Downloaded uint64
@@ -18,12 +19,18 @@ type CountingWriter struct {
 }
 
 func (wc *CountingWriter) Write(p []byte) (int, error) {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+
 	n := len(p)
 	wc.Downloaded += uint64(n)
 	return n, nil
 }
 
 func (wc *CountingWriter) String() string {
+	wc.mu.RLock()
+	defer wc.mu.RUnlock()
+	
 	if wc.Err != nil {
 		return wc.Err.Error()
 	} else {

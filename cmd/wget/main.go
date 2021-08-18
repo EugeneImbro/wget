@@ -18,23 +18,23 @@ type CountingWriter struct {
 	Err        error
 }
 
-func (wc *CountingWriter) Write(p []byte) (int, error) {
-	wc.mu.Lock()
-	defer wc.mu.Unlock()
+func (cw *CountingWriter) Write(p []byte) (int, error) {
+	cw.mu.Lock()
+	defer cw.mu.Unlock()
 
 	n := len(p)
-	wc.Downloaded += uint64(n)
+	cw.Downloaded += uint64(n)
 	return n, nil
 }
 
-func (wc *CountingWriter) String() string {
-	wc.mu.RLock()
-	defer wc.mu.RUnlock()
-	
-	if wc.Err != nil {
-		return wc.Err.Error()
+func (cw *CountingWriter) String() string {
+	cw.mu.RLock()
+	defer cw.mu.RUnlock()
+
+	if cw.Err != nil {
+		return cw.Err.Error()
 	} else {
-		return fmt.Sprintf("%s %d%%", wc.Filename, wc.Downloaded*100/wc.Total)
+		return fmt.Sprintf("%s %d%%", cw.Filename, cw.Downloaded*100/cw.Total)
 	}
 }
 
@@ -43,18 +43,17 @@ type Progress struct {
 	Counters []*CountingWriter
 }
 
-func (p *Progress) AddCounter(wc *CountingWriter) {
+func (p *Progress) AddCounter(cw *CountingWriter) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	p.Counters = append(p.Counters, wc)
+	p.Counters = append(p.Counters, cw)
 }
 
 func (p *Progress) PrintProgress() {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	//todo tab writer
 	fmt.Printf("\r")
 	for _, v := range p.Counters {
 		fmt.Printf("%s | ", v)
@@ -70,10 +69,12 @@ func main() {
 
 	for _, arg := range urls {
 		wg.Add(1)
+		ch := make(chan *CountingWriter)
 		go func(url string) {
 			defer wg.Done()
-			downloadFile(url, progress)
+			downloadFile(url, ch)
 		}(arg)
+		progress.AddCounter(<-ch)
 	}
 
 	ticker := time.NewTicker(500 * time.Millisecond)
@@ -103,26 +104,26 @@ func unique(s []string) []string {
 	return out
 }
 
-func downloadFile(url string, progress *Progress) {
+func downloadFile(url string, ch chan *CountingWriter) {
 	fileName := filepath.Base(url)
-	wc := &CountingWriter{Filename: fileName}
-	progress.AddCounter(wc)
+	cw := &CountingWriter{Filename: fileName}
+	ch <- cw
 	resp, err := http.Get(url)
 	if err != nil {
-		wc.Err = err
+		cw.Err = err
 		return
 	}
 	defer resp.Body.Close()
 
 	out, err := os.Create(fileName)
 	if err != nil {
-		wc.Err = err
+		cw.Err = err
 		return
 	}
 	defer out.Close()
 
-	wc.Total = uint64(resp.ContentLength)
+	cw.Total = uint64(resp.ContentLength)
 
-	_, err = io.Copy(out, io.TeeReader(resp.Body, wc))
-	wc.Err = err
+	_, err = io.Copy(out, io.TeeReader(resp.Body, cw))
+	cw.Err = err
 }

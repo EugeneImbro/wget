@@ -1,161 +1,137 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
+	"path"
 	"sync"
 	"syscall"
 	"time"
 )
 
-type CountingWriter struct {
-	mu         sync.RWMutex
-	Filename   string
-	Total      uint64
-	Downloaded uint64
-	Err        error
-	Closer     io.Closer
-}
+type WriterFn func(int64)
 
-func (cw *CountingWriter) Write(p []byte) (int, error) {
-	cw.mu.Lock()
-	defer cw.mu.Unlock()
-
+func (f WriterFn) Write(p []byte) (int, error) {
 	n := len(p)
-	cw.Downloaded += uint64(n)
+	f(int64(n))
 	return n, nil
 }
 
-func (cw *CountingWriter) String() string {
-	cw.mu.RLock()
-	defer cw.mu.RUnlock()
-
-	if cw.Err != nil {
-		return cw.Err.Error()
-	} else {
-		return fmt.Sprintf("%s %d%%", cw.Filename, cw.Downloaded*100/cw.Total)
-	}
-}
-
-type Progress struct {
-	mu       sync.RWMutex
-	Counters []*CountingWriter
-}
-
-func (p *Progress) AddCounter(cw *CountingWriter) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	p.Counters = append(p.Counters, cw)
-}
-
-func (p *Progress) PrintProgress() {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	fmt.Printf("\r")
-	for _, v := range p.Counters {
-		fmt.Printf("%s | ", v)
-	}
-}
-
 func main() {
-	urls := unique(os.Args[1:])
-	progress := &Progress{Counters: make([]*CountingWriter, 0)}
-	wg := sync.WaitGroup{}
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	//interrupt cleanup
 	go func() {
 		sigs := make(chan os.Signal, 1)
 		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 		s := <-sigs
-		ticker.Stop()
-
 		fmt.Printf("\nTerminating by %s signal\n", s)
-		exitCode := 0
-		for _, c := range progress.Counters {
-			if c.Err != nil || c.Closer == nil || c.Downloaded*100/c.Total == 100 {
-				continue
-			} else {
-				if err := c.Closer.Close(); err != nil {
-					fmt.Printf("Cannot gracefully terminate the program. %s\n", err.Error())
-					exitCode = 1
-					continue
-				}
-
-				if err := os.Remove(c.Filename); err != nil {
-					fmt.Printf("Cannot gracefully terminate the program. %s\n", err.Error())
-					exitCode = 1
-				}
-			}
-		}
-		fmt.Print("Terminated")
-		os.Exit(exitCode)
+		//вот это по идее не правильно т.к. фактически вызывается не там, где создается.
+		cancel()
 	}()
 
-	fmt.Println("Download started...")
+	fmt.Println("Download started")
+	urls := os.Args[1:]
 
-	for _, arg := range urls {
-		wg.Add(1)
-		ch := make(chan *CountingWriter)
-		go func(url string) {
-			defer wg.Done()
-			downloadFile(url, ch)
-		}(arg)
-		progress.AddCounter(<-ch)
-	}
+	//хуй знает, как сделать периодический вывод без подобной структуры
+	//и да, это должно быть thread safe над слайсом.
+	progress := make([]string, len(urls))
 
 	go func() {
-		for range ticker.C {
-			progress.PrintProgress()
+		t := time.NewTicker(100 * time.Millisecond)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				printProgress(progress)
+			}
 		}
 	}()
 
+	wg := &sync.WaitGroup{}
+	for i, url := range urls {
+		wg.Add(1)
+		filePath := path.Base(url)
+		p, e := download(ctx, url, filePath)
+		progressIndex := i
+		go func() {
+			for {
+				select {
+				case v, ok := <-p:
+					if !ok {
+						wg.Done()
+						return
+					}
+					progress[progressIndex] = fmt.Sprintf("%s %d%%", filePath, v)
+				case err := <-e:
+					progress[progressIndex] = fmt.Sprintf("%s", err.Error())
+					wg.Done()
+					return
+				}
+			}
+		}()
+	}
 	wg.Wait()
-	ticker.Stop()
-	progress.PrintProgress()
+	//такое себе, но выводит конечный стейт.
+	printProgress(progress)
 
-	fmt.Println("\nDownload finished.")
 }
 
-func unique(s []string) []string {
-	m := make(map[string]struct{}, len(s))
-	out := make([]string, 0, len(s))
+func printProgress(p []string) {
+	fmt.Printf("\r")
+	for _, v := range p {
+		fmt.Printf("%s | ", v)
+	}
+}
 
-	for _, v := range s {
-		if _, ok := m[v]; !ok {
-			m[v] = struct{}{}
-			out = append(out, v)
+func download(ctx context.Context, url string, filePath string) (progress chan int, errors chan error) {
+	progress = make(chan int)
+	errors = make(chan error)
+
+	go func() {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			errors <- err
+			return
 		}
-	}
-	return out
-}
 
-func downloadFile(url string, ch chan *CountingWriter) {
-	fileName := filepath.Base(url)
-	cw := &CountingWriter{Filename: fileName}
-	ch <- cw
-	resp, err := http.Get(url)
-	if err != nil {
-		cw.Err = err
-		return
-	}
-	defer resp.Body.Close()
+		client := &http.Client{}
+		resp, err := client.Do(req)
 
-	out, err := os.Create(fileName)
-	if err != nil {
-		cw.Err = err
-		return
-	}
-	defer out.Close()
-	cw.Closer = out
-	cw.Total = uint64(resp.ContentLength)
+		if err != nil {
+			errors <- err
+			return
+		}
+		defer resp.Body.Close()
 
-	_, err = io.Copy(out, io.TeeReader(resp.Body, cw))
-	cw.Err = err
+		out, err := os.Create(filePath)
+		if err != nil {
+			errors <- err
+			return
+		}
+		defer out.Close()
+
+		_, err = io.Copy(out, io.TeeReader(
+			resp.Body,
+			func(total int64, ch chan int) WriterFn {
+				downloaded := int64(0)
+				return func(p int64) {
+					downloaded += p
+					ch <- int(downloaded * 100 / total)
+				}
+			}(resp.ContentLength, progress),
+		))
+
+		if err != nil {
+			defer os.Remove(filePath)
+			errors <- err
+		}
+		close(progress)
+	}()
+	return
 }

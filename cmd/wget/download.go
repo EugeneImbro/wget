@@ -1,32 +1,50 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"path"
+	"syscall"
 )
 
-type FuncWriter func(int64)
+type WriterFn func(int64)
 
-func (f FuncWriter) Write(p []byte) (int, error) {
+func (f WriterFn) Write(p []byte) (int, error) {
 	n := len(p)
 	f(int64(n))
 	return n, nil
 }
 
 func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		sigs := make(chan os.Signal, 1)
+		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+		s := <-sigs
+		fmt.Printf("\nTerminating by %s signal\n", s)
+		_, cancel := context.WithCancel(ctx)
+		cancel()
+		os.Exit(0)
+	}()
+
 	url := os.Args[1]
-	p, e := download(url)
+	filePath := path.Base(url)
+
 	fmt.Printf("Download: %s\n", url)
+	p, e := download(ctx, url, filePath)
 	for {
 		select {
 		case v, ok := <-p:
 			if !ok {
 				return
 			}
-			fmt.Printf("\r%d %%", v)
+			fmt.Printf("\r%s: %d%%", filePath, v)
 		case err := <-e:
 			fmt.Printf("%s", err.Error())
 			return
@@ -34,28 +52,36 @@ func main() {
 	}
 }
 
-func download(url string) (progress chan int, errors chan error) {
+func download(ctx context.Context, url string, filePath string) (progress chan int, errors chan error) {
 	progress = make(chan int)
 	errors = make(chan error)
 
 	go func() {
-		fileName := path.Base(url)
-		resp, err := http.Get(url)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			errors <- err
+			return
+		}
+
+		client := &http.Client{}
+		resp, err := client.Do(req)
+
 		if err != nil {
 			errors <- err
 			return
 		}
 		defer resp.Body.Close()
 
-		out, err := os.Create(fileName)
+		out, err := os.Create(filePath)
 		if err != nil {
 			errors <- err
+			return
 		}
 		defer out.Close()
 
 		_, err = io.Copy(out, io.TeeReader(
 			resp.Body,
-			func(total int64, ch chan int) FuncWriter {
+			func(total int64, ch chan int) WriterFn {
 				downloaded := int64(0)
 				return func(p int64) {
 					downloaded += p
@@ -65,6 +91,7 @@ func download(url string) (progress chan int, errors chan error) {
 		))
 
 		if err != nil {
+			_ = os.Remove(filePath)
 			errors <- err
 		}
 		close(progress)

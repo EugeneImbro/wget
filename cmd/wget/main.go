@@ -10,6 +10,7 @@ import (
 	"path"
 	"sync"
 	"syscall"
+	"text/tabwriter"
 	"time"
 )
 
@@ -21,25 +22,36 @@ func (f WriterFn) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+type ProgressStatus struct {
+	Url string
+	p   int
+	err error
+}
+
+func (s *ProgressStatus) String() string {
+	if s.err != nil {
+		return s.err.Error()
+	}
+	return fmt.Sprintf("%d%%", s.p)
+}
+
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	go func() {
 		sigs := make(chan os.Signal, 1)
 		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 		s := <-sigs
 		fmt.Printf("\nTerminating by %s signal\n", s)
-		//вот это по идее не правильно т.к. фактически вызывается не там, где создается.
 		cancel()
 	}()
 
 	fmt.Println("Download started")
 	urls := os.Args[1:]
+	urls = uniq(urls)
 
-	//хуй знает, как сделать периодический вывод без подобной структуры
-	//и да, это должно быть thread safe над слайсом.
-	progress := make([]string, len(urls))
+	progress := make(map[string]*ProgressStatus)
+	commonCh := make(chan *ProgressStatus, len(urls))
 
 	go func() {
 		t := time.NewTicker(100 * time.Millisecond)
@@ -47,53 +59,81 @@ func main() {
 			select {
 			case <-ctx.Done():
 				return
+			case s, ok := <-commonCh:
+				if !ok {
+					printProgress(urls, progress)
+					return
+				}
+				progress[s.Url] = s
 			case <-t.C:
-				printProgress(progress)
+				printProgress(urls, progress)
 			}
 		}
 	}()
 
 	wg := &sync.WaitGroup{}
-	for i, url := range urls {
+	for _, url := range urls {
 		wg.Add(1)
 		filePath := path.Base(url)
 		p, e := download(ctx, url, filePath)
-		progressIndex := i
+		url := url
 		go func() {
+			defer wg.Done()
 			for {
 				select {
 				case v, ok := <-p:
 					if !ok {
-						wg.Done()
 						return
 					}
-					progress[progressIndex] = fmt.Sprintf("%s %d%%", filePath, v)
-				case err := <-e:
-					progress[progressIndex] = fmt.Sprintf("%s", err.Error())
-					wg.Done()
+					commonCh <- &ProgressStatus{Url: url, p: v}
+				case err, ok := <-e:
+					if !ok {
+						return
+					}
+					commonCh <- &ProgressStatus{Url: url, err: err}
 					return
 				}
 			}
 		}()
 	}
 	wg.Wait()
-	//такое себе, но выводит конечный стейт.
-	printProgress(progress)
+	close(commonCh)
 
 }
 
-func printProgress(p []string) {
-	fmt.Printf("\r")
-	for _, v := range p {
-		fmt.Printf("%s | ", v)
+func uniq(s []string) []string {
+	var result []string
+	m := make(map[string]bool)
+	for _, v := range s {
+		_, ok := m[v]
+		if !ok {
+			m[v] = true
+			result = append(result, v)
+		}
 	}
+	return result
+}
+
+func printProgress(u []string, p map[string]*ProgressStatus) {
+	fmt.Println()
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 0, ' ', tabwriter.Debug)
+	for _, url := range u {
+		_, ok := p[url]
+		if ok {
+			fmt.Fprintln(w, fmt.Sprintf("%s \t%s", url, p[url]))
+		}
+	}
+	w.Flush()
 }
 
 func download(ctx context.Context, url string, filePath string) (progress chan int, errors chan error) {
-	progress = make(chan int)
-	errors = make(chan error)
+	progress = make(chan int, 1)
+	errors = make(chan error, 1)
 
 	go func() {
+		defer close(progress)
+		defer close(errors)
+
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
 			errors <- err
@@ -128,10 +168,9 @@ func download(ctx context.Context, url string, filePath string) (progress chan i
 		))
 
 		if err != nil {
-			defer os.Remove(filePath)
 			errors <- err
+			defer os.Remove(filePath)
 		}
-		close(progress)
 	}()
 	return
 }

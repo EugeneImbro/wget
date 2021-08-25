@@ -48,7 +48,7 @@ func main() {
 
 	fmt.Println("Download started")
 	urls := os.Args[1:]
-	urls = uniq(urls)
+	urls = unique(urls)
 
 	progress := make(map[string]*ProgressStatus)
 	commonCh := make(chan *ProgressStatus, len(urls))
@@ -101,14 +101,13 @@ func main() {
 
 }
 
-func uniq(s []string) []string {
+func unique(s []string) []string {
 	var result []string
-	m := make(map[string]bool)
-	for _, v := range s {
-		_, ok := m[v]
-		if !ok {
-			m[v] = true
-			result = append(result, v)
+	keys := make(map[string]bool)
+	for _, entry := range s {
+		if _, ok := keys[entry]; !ok {
+			keys[entry] = true
+			result = append(result, entry)
 		}
 	}
 	return result

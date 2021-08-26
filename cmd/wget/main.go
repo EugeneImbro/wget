@@ -14,7 +14,6 @@ import (
 	"time"
 )
 
-
 type ProgressStatus struct {
 	Url string
 	p   int
@@ -41,32 +40,14 @@ func main() {
 		cancel()
 	}()
 
-	fmt.Println("Download started")
 	urls := os.Args[1:]
 	urls = unique(urls)
 
 	commonCh := make(chan *ProgressStatus, len(urls))
-
-	go func() {
-		progress := make(map[string]*ProgressStatus)
-		t := time.NewTicker(500 * time.Millisecond)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case s, ok := <-commonCh:
-				if !ok {
-					printProgress(progress)
-					return
-				}
-				progress[s.Url] = s
-			case <-t.C:
-				printProgress(progress)
-			}
-		}
-	}()
-
 	wg := &sync.WaitGroup{}
+
+	fmt.Println("Download started")
+
 	for _, url := range urls {
 		wg.Add(1)
 		filePath := path.Base(url)
@@ -91,8 +72,30 @@ func main() {
 			}
 		}()
 	}
-	wg.Wait()
-	close(commonCh)
+
+	go func() {
+		wg.Wait()
+		close(commonCh)
+	}()
+
+	progress := make(map[string]*ProgressStatus)
+	t := time.NewTicker(500 * time.Millisecond)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case s, ok := <-commonCh:
+			if !ok {
+				printProgress(progress)
+				fmt.Println("\nDownload finished.")
+				return
+			}
+			progress[s.Url] = s
+		case <-t.C:
+			printProgress(progress)
+		}
+	}
+
 }
 
 func unique(s []string) []string {
@@ -123,4 +126,3 @@ func printProgress(p map[string]*ProgressStatus) {
 	}
 	writer.Flush()
 }
-

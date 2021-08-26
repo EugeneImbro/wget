@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"sort"
 	"sync"
 	"syscall"
 	"text/tabwriter"
@@ -35,6 +36,8 @@ func (s *ProgressStatus) String() string {
 	return fmt.Sprintf("%d%%", s.p)
 }
 
+var writer = tabwriter.NewWriter(os.Stdout, 0, 0, 0, ' ', tabwriter.Debug)
+
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -50,23 +53,23 @@ func main() {
 	urls := os.Args[1:]
 	urls = unique(urls)
 
-	progress := make(map[string]*ProgressStatus)
 	commonCh := make(chan *ProgressStatus, len(urls))
 
 	go func() {
-		t := time.NewTicker(100 * time.Millisecond)
+		progress := make(map[string]*ProgressStatus)
+		t := time.NewTicker(500 * time.Millisecond)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case s, ok := <-commonCh:
 				if !ok {
-					printProgress(urls, progress)
+					printProgress(progress)
 					return
 				}
 				progress[s.Url] = s
 			case <-t.C:
-				printProgress(urls, progress)
+				printProgress(progress)
 			}
 		}
 	}()
@@ -98,7 +101,6 @@ func main() {
 	}
 	wg.Wait()
 	close(commonCh)
-
 }
 
 func unique(s []string) []string {
@@ -113,16 +115,21 @@ func unique(s []string) []string {
 	return result
 }
 
-func printProgress(u []string, p map[string]*ProgressStatus) {
+func printProgress(p map[string]*ProgressStatus) {
+	keys := make([]string, 0, len(p))
+	for k := range p {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
 	fmt.Println()
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 0, ' ', tabwriter.Debug)
-	for _, url := range u {
+	for _, url := range keys {
 		_, ok := p[url]
 		if ok {
-			fmt.Fprintln(w, fmt.Sprintf("%s \t%s", url, p[url]))
+			fmt.Fprintln(writer, fmt.Sprintf("%s \t%s", url, p[url]))
 		}
 	}
-	w.Flush()
+	writer.Flush()
 }
 
 func download(ctx context.Context, url string, filePath string) (progress chan int, errors chan error) {

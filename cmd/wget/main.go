@@ -43,7 +43,9 @@ func main() {
 	urls := os.Args[1:]
 	urls = unique(urls)
 
+	//channel for progress from all download routines
 	commonCh := make(chan *ProgressStatus, len(urls))
+	//group to handle all downloads are done case
 	wg := &sync.WaitGroup{}
 
 	fmt.Println("Download started")
@@ -73,6 +75,7 @@ func main() {
 		}()
 	}
 
+	//wait for all downloads are done and close progress channel
 	go func() {
 		wg.Wait()
 		close(commonCh)
@@ -80,6 +83,7 @@ func main() {
 
 	progress := make(map[string]*ProgressStatus)
 	t := time.NewTicker(500 * time.Millisecond)
+	//handle progress + modify map with current state and print by tick until progress chan is not closed.
 	for {
 		select {
 		case <-ctx.Done():
